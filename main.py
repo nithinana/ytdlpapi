@@ -1,4 +1,6 @@
 """
+YouTube Music API powered by yt-dlp + FastAPI.
+
 Endpoints
   GET /search?q=...&type=songs|albums|artists|playlists&limit=20
   GET /album/{browse_id}              Album + tracks
@@ -67,16 +69,27 @@ def require_key(x_api_key: Optional[str] = Header(default=None)):
 
 
 def base_opts(**extra) -> dict:
+    # Use iOS/Mobile player clients by default to bypass YouTube bot detection
+    clients = os.getenv("YTDLP_PLAYER_CLIENT", "ios,mweb,android").split(",")
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": clients,
+            }
+        },
     }
-    # Optional: cookies for age-restricted / Premium content
-    # export YTDLP_COOKIES=/path/to/cookies.txt
+    # Optional: export YTDLP_COOKIES=/path/to/cookies.txt
     if os.getenv("YTDLP_COOKIES"):
         opts["cookiefile"] = os.getenv("YTDLP_COOKIES")
+    # Optional: export YTDLP_COOKIES_FROM_BROWSER=chrome or firefox
+    if os.getenv("YTDLP_COOKIES_FROM_BROWSER"):
+        browser_spec = os.getenv("YTDLP_COOKIES_FROM_BROWSER").split(":")
+        opts["cookiesfrombrowser"] = tuple(browser_spec)
+
     opts.update(extra)
     return opts
 
@@ -515,10 +528,6 @@ def cover(video_id: str, s: int = Query(400, ge=64, le=1000)):
 
 
 # ---- Home feed -------------------------------------------------------------
-# India / Tamil focused. Song rows come from official YouTube Music playlists and
-# the "songs" search filter, so they are audio tracks rather than music videos.
-# Types: playlist (fixed id) | playlist_search (top official playlist for a query)
-#        songs | featured_playlists | albums | artists.  Edit freely.
 KOLLYWOOD_HITLIST = "RDCLAK5uy_nTbyVypdXPQd00z15bTWjZr7pG-26yyQ4"
 HOME_PLAN = [
     {"id": "kollywood", "type": "playlist", "title": "Kollywood Hitlist", "playlist": KOLLYWOOD_HITLIST},
@@ -533,7 +542,7 @@ HOME_PLAN = [
     {"id": "albums", "type": "albums", "title": "Tamil albums", "query": "Tamil movie soundtrack"},
     {"id": "artists", "type": "artists", "title": "Tamil artists", "query": "Tamil playback singer"},
 ]
-# Used only when ytmusicapi isn't installed
+
 HOME_FALLBACK = [("kollywood", "Kollywood Hitlist", [f"{MUSIC_URL}/playlist?list={KOLLYWOOD_HITLIST}"])]
 _home_cache = {"t": 0.0, "data": None}
 
@@ -659,7 +668,6 @@ def health():
 
 
 if __name__ == "__main__":
-    # Lets you start the server with:  python main.py   (or whatever you named the file)
     import uvicorn
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
