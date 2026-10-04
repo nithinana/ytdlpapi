@@ -128,6 +128,10 @@ def base_opts(**extra) -> dict:
         browser_spec = os.getenv("YTDLP_COOKIES_FROM_BROWSER").split(":")
         opts["cookiesfrombrowser"] = tuple(browser_spec)
 
+    proxy = os.getenv("YTDLP_PROXY")  # e.g. http://user:pass@host:port (residential proxy)
+    if proxy:
+        opts["proxy"] = proxy
+
     opts.update(extra)
     return opts
 
@@ -698,6 +702,36 @@ def mood(name: str = Query(...)):
     if out:
         _mood_cache[name] = (time.time(), data)
     return data
+
+
+@app.get("/debug", dependencies=[Depends(require_key)])
+def debug():
+    """Shows whether cookies/JS runtime are visible to the server (no secrets returned)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled = os.path.join(here, "cookies.txt")
+    opts = base_opts()
+    cf = opts.get("cookiefile")
+    names, bad_lines = [], 0
+    if cf and os.path.exists(cf):
+        for line in open(cf, encoding="utf-8", errors="ignore"):
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) == 7:
+                names.append(parts[5])
+            else:
+                bad_lines += 1
+    return {
+        "yt_dlp": yt_dlp.version.__version__,
+        "cookies_txt_in_repo": os.path.exists(bundled),
+        "cookiefile_used": bool(cf),
+        "cookie_count": len(names),
+        "has_SID": "SID" in names, "has_PSIDTS": "__Secure-1PSIDTS" in names,
+        "malformed_cookie_lines": bad_lines,
+        "player_clients": opts["extractor_args"]["youtube"]["player_client"],
+        "proxy_set": bool(opts.get("proxy")),
+        "deno": shutil.which("deno"), "node": shutil.which("node"),
+    }
 
 
 @app.get("/health")
