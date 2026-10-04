@@ -76,7 +76,7 @@ def require_key(x_api_key: Optional[str] = Header(default=None)):
 
 def base_opts(**extra) -> dict:
     """Configures yt-dlp with player clients, PO Tokens, and cookie authentication."""
-    clients = os.getenv("YTDLP_PLAYER_CLIENT", "mweb,ios,android").split(",")
+    clients = os.getenv("YTDLP_PLAYER_CLIENT", "android,ios,mweb").split(",")
     youtube_args = {
         "player_client": clients,
     }
@@ -107,10 +107,11 @@ def base_opts(**extra) -> dict:
     # Option B: Raw cookies passed as text via environment variable (useful for Render)
     cookie_text = os.getenv("YTDLP_COOKIES_TEXT")
     if cookie_text and not opts.get("cookiefile"):
+        clean_cookies = cookie_text.replace("\\n", "\n")
         tmp_cookie = os.path.join(tempfile.gettempdir(), "render_yt_cookies.txt")
         try:
             with open(tmp_cookie, "w", encoding="utf-8") as f:
-                f.write(cookie_text)
+                f.write(clean_cookies)
             opts["cookiefile"] = tmp_cookie
         except Exception:
             pass
@@ -386,7 +387,7 @@ def artist(channel_id: str):
 def track(video_id: str):
     """Full metadata for a track."""
     check_video_id(video_id)
-    info = extract(f"{MUSIC_URL}/watch?v={video_id}", base_opts())
+    info = extract(f"https://www.youtube.com/watch?v={video_id}", base_opts())
     return {
         **track_summary(info),
         "release_year": info.get("release_year"),
@@ -402,7 +403,8 @@ def stream(video_id: str):
     """Best direct audio stream URL."""
     check_video_id(video_id)
     info = extract(
-        f"{MUSIC_URL}/watch?v={video_id}", base_opts(format="bestaudio/best/ba/b")
+        f"https://www.youtube.com/watch?v={video_id}",
+        base_opts(format="bestaudio/best/ba*/b*"),
     )
     return {
         **track_summary(info),
@@ -434,7 +436,7 @@ def download(
     tmp = tempfile.mkdtemp(prefix="ytm_")
     opts = base_opts(
         skip_download=False,
-        format="bestaudio/best/ba/b",
+        format="bestaudio/best/ba*/b*",
         outtmpl=os.path.join(tmp, "%(artist,uploader)s - %(title)s.%(ext)s"),
         restrictfilenames=True,
         writethumbnail=False,
@@ -449,7 +451,7 @@ def download(
         ]
 
     try:
-        extract(f"{MUSIC_URL}/watch?v={video_id}", opts, download=True)
+        extract(f"https://www.youtube.com/watch?v={video_id}", opts, download=True)
         files = os.listdir(tmp)
         if not files:
             raise HTTPException(500, "Download produced no file")
@@ -484,7 +486,7 @@ def playlist(playlist_id: str, limit: int = Query(100, ge=1, le=500)):
         except Exception:
             pass
     info = extract(
-        f"{MUSIC_URL}/playlist?list={playlist_id}",
+        f"https://www.youtube.com/playlist?list={playlist_id}",
         base_opts(extract_flat=True, noplaylist=False, playlistend=limit),
     )
     tracks = [track_summary(e) for e in info.get("entries", []) if e]
