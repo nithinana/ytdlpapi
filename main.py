@@ -142,13 +142,31 @@ def check_video_id(video_id: str) -> str:
     return video_id
 
 
+# Client combos tried in order when YouTube rejects one (bot wall / "page needs to be reloaded").
+CLIENT_FALLBACKS = [c for c in os.getenv(
+    "YTDLP_CLIENT_FALLBACKS", "tv,web_safari;mweb;web;default"
+).split(";") if c]
+_RETRY_HINTS = ("reloaded", "Sign in to confirm", "not a bot", "player response", "n challenge", "Requested format")
+
+
 def extract(url: str, opts: dict, download: bool = False) -> dict:
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            return ydl.extract_info(url, download=download)
-    except yt_dlp.utils.DownloadError as e:
-        clean_err = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
-        raise HTTPException(502, f"yt-dlp error: {clean_err}")
+    import copy
+
+    current = ",".join(opts.get("extractor_args", {}).get("youtube", {}).get("player_client", []))
+    attempts = [None] + [c for c in CLIENT_FALLBACKS if c != current]
+    last = None
+    for clients in attempts:
+        o = copy.deepcopy(opts)
+        if clients:
+            o.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = clients.split(",")
+        try:
+            with yt_dlp.YoutubeDL(o) as ydl:
+                return ydl.extract_info(url, download=download)
+        except yt_dlp.utils.DownloadError as e:
+            last = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
+            if not any(h in last for h in _RETRY_HINTS):
+                break
+    raise HTTPException(502, f"yt-dlp error: {last}")
 
 
 def thumb(info: dict) -> Optional[str]:
