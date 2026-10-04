@@ -102,6 +102,113 @@ def require_key(x_api_key: Optional[str] = Header(default=None)):
         raise HTTPException(401, "Invalid or missing X-API-Key")
 
 
+# ---- Embedded YouTube cookies --------------------------------------------------
+# Only the youtube.com / google.com / accounts.google.com cookies from your export
+# (62 of the 7,449 in the original file), deduplicated, zlib-compressed + base64.
+# SENSITIVE: this is a logged-in session for your Google account. Keep this repo
+# PRIVATE, and never paste this file anywhere public. Env vars below override it.
+_EMBEDDED_COOKIES_B64 = (
+    "eNrtesfS21a27pj9FF11fT2jGjm4SgNkAiBy5gSFRORABCJUP/zhL6llS23LkvueO2oOSGJxY4W9vxWJ//N3NZunJBqyv19sW/87"
+    "0/d1mf2dL5vsb+/yvs+b7F3StyfbdLjTP57ZWN73jxcgASAwgiAAcLJUkT1R3GtdaufXs4iLFeibXesr9xUvLjePwCTfj+8bmolS"
+    "ykcWd7+RJM9FN70oRgCNJOxikcCa7PAZQykR4FuHy1YFqRVcSIObCxbChq5/e7f3y7zEv9XoxFNX64MyEAChCESewjw6CRT4DnyH"
+    "khCMQfDrK44iKIjjIPwdLAj4jUUIXQPeNWSIvJwEC3pxm0AcwxHsJYP4qYd/ysGf5n9RCPinCv2pAX4qgN/ZtE/bhZMYjqIQgZ3C"
+    "0MqSZczOtMPInH1iVJH5W5Qk/dLN02/v/6jYvxgQIAGjIIFAJ0ux3BPFXuzsTD32J/RcaHhZyurAqXHRhkLGlE2Y0LArScN8pIzu"
+    "+xGAzCuX1tyjpe+O1Us0b0/hxX2SkRrEKg+KWeA/qJIQbphuDo4ymoGtCj7sZN4YqJd7gcu9+LhtgzJTgPlYjIKFWbaZsGIGg/Ac"
+    "NRD5tDTJsas9kPXx8EHqdzf7sy0v5OAA/OtmBHZouzxlneb3CPnaKOjn6T38DRY4SSIw9MaC5VyR4UJR5bUTU2xa1tS77ZpVCpDc"
+    "DR50l3Nh2x8qlUMf0eHqhv36QRHggxQFQSo/fH4DGMBpLdPsBP7e0f5rhXWKy6Ypu/y8lOcn/B7sOLjtqn2A5+bs8LvCwYnSl167"
+    "VccooP4vXyw/Z/fsT2/5HoRACATjJI6cKIbRHNUOmYumWZx5ovgtfIgo9KiyI35cIC82jQGcdX/u+F1dtYB6Ck+cSqRwbFvLUnVy"
+    "v/j36Aryr629p7ACc4Vkd0N5ZVrbHoeSJ0ZcJNnuaXZpzD9Bwe6r6hoAxwzuQ2cAIL1Vewi+XF7zXYOZeSE3x6d2s/JAH60JvD+c"
+    "zcbUpLyqS4g/vdYOgtDOzX1T+eheKwZob9rNvFNRTHOMjtd3NpvNui5xHZTvR6AlnXcWL6WFt1AYUyahpcRhD1gYBo/gLHLOgZqt"
+    "IBcozqrXWr0+lI4anR1rLrpngzMB20ACitrCVmtmdKMEm8Kl07hnRCXQIwlx86IarlbENypiYTladqQIn5wkZlE0xwHyaJ+6iEOc"
+    "ht6oacVQzDQeLL3bWHe3HI+ufFDacWEtIufBPMfMNGVPTnx5ElSNDzacpKjCv0KqgcgMdkdvGsFlA0usnMUOgqLX/YO6MxFAYTyK"
+    "1FoSwcKuRhSRcHo9898BBJyEIRIGEOKk2bcTQQAYBuIhCoUoFoIQTALA2wUCYzABfBeuIBRAQAQ7XS3tejn9M7RcMeSuMglMMttJ"
+    "CStQSqm/Dt10TPHWkJsBF57lbbTpp0vgoGDiq55bpYzHSZXDS+2tHuasBNYIHgKLS6+BbT6D1oScujkcx20dgQfNVyhK1vCXf0Ik"
+    "gZAIAfyCgSD2rQiOkwQBvWL9WxJImjBaTm9pAEReoeLlFhj6SgQkCKDga8UfOzP4tls4QZLoyeIok7mEFqVwlmhzJyY3xPODo78V"
+    "2ACMwEAAAk9vOZHpA4ahOGuhOFrbBNbSs5x3L1X1ip33c/LUKLfbinWERuk6bTSH812APw1fTM1VMO/CA2Gl2oAdiA0qTmgfqtHm"
+    "YNnb9dkZ6nbZdv3Bke2kayO1eXP0NFedBwRhfp3xAG3GzWB44Wkal2NKpuezQ8tOlrfnMK0qJhGaExWxihB9kQjPBWyvveINdhMu"
+    "O+XRgGPcZeIceirVMVOqQsschCbI9Bo85KKuw4eEloRy1Xelre647dOg9IRMMC/U/D6v4cK6eqzLFLe/xFsjddcrdV8CMuNoP8/7"
+    "WLkJ53vFEwkp0Mql8a6HRBraY4e3/bKEI8rqXn2JbqJDeQtYafZQzWSnZXNObbfiGTyYvExUj16/C70oRuAw/pZ4L/00nwVKt2zr"
+    "lEfDNE9npgTora7TKsrLgaVlX7JSGPZlJVIrJi0d0z06PfOR4NKpuNsomg/0neXjAfMszwhhUMb7999C00fpxAtNL0Dk7yIAAFij"
+    "3cyK8oL5SMJHh2Fr/nxMpu9ibJvHgkQGXSabGdzvh9KRhVMdtZL7d81T1ONh8gZoqlK8UkweyFQKWJTpWLxxEXxIKfu+HVDJQP04"
+    "gRCWJSXeliK6dymHJ3Z5dBXScxLTAxnjFbepUL8OxQ4AOPbHdcuvBnxO1aD+120BZdu/wSLaR0eRRL7kbM51MT7a4gZf2LKnRRkK"
+    "Z8o42JvbdQTNpMFafLYl7rHGPdyrHGOlghTdXWEK44dtgf8DW2JN1sBXsoRf6YzPgIgLZl7+dC4O9YUtZ9zV2mg5o9LZm/RDPgBb"
+    "Wz+fy8PtHFRd96csREXvuQgKTyr2wZbvxvfLqOubKf27KG3L7jfr//lGmrJuyr4kJkU0f00Z+zZbs3ia+/Hr1X039W9XTb+kv//T"
+    "vRyzOPpaTDqWz98lLVM2vm6ds+4rNfKxX4bpS1rz0v9LShuVzVeULPuKU7t/2r9/J8/ls5z3L+ldP2fxqwP6fWrTfkkfin7up5fV"
+    "92/Y8mnRl7Qm+krwmLUvIWk21XM/fPnT7xzFHNXZKwH9lji9E+jX26e89Mtv8DwWMq2R9o0ZlHYk9iCTOJ85H2fpGeDorO4JFVd+"
+    "vnCL3Vz5zaK8iHIkufdBtt8laQo/4TmYvsAz/krSCaYyhzDF4105WzGl6Z9987FepudReQJX3SJfd0TQVJL5h/H8KV6D+n+B/V9g"
+    "/yfA3pOEiqyzGZvtJQvChp09u84/BWrkC2CLHeVkm2bXyiJLRuuTrmEZnwN1T6B1xN3Hce0kdlc9eTgeyfpXgQ3/F9j/BfZ/BGx4"
+    "dpdbJ11x6tbQeyMSkOOln6qpW/JlBaLXQPAs/DN0K3KIa5WOI+xfK5B2l8Q7Y9/ZUGazpL8TqD0Hf1RN/Vtte3nDMXUwGqd5lXK9"
+    "zVL6CNnvKcSsD3dizsKKotzjUSFyVl9/l1BKF99uLpQn55wBxCbEnKZs7h+Uje2IhzUqFs4j796G79LjE7dWUPuBr+PO4V2SE8x/"
+    "UKJrvtpzNS+ujucaF/MHS+X/Hb7wD/D9C5HprUU6gb+UVR7rqN9lLTxsJcESnanbPiAn51vvQkKOwg0boIwts6uIupk4XkzwcfYn"
+    "X0rmHqT1BZeOOaK0OxwbHZU+72A2vKRXDqGkENqWoDYr5cMduoKeuKLwxPxK0qm26C2G1n6frYnB5xb8uO+bL3Dlq7csVbgqTPi6"
+    "ULKQCvhZsg9lu5K5I5oI9GqqH68AL9AAIDn7E7hRi6mZ+S+PV8uq4nhlIDRBPKflm1PgD1uBAOQnTJsZBTuMfIML+iHKLvKt3v/z"
+    "rR9BvdrndTwqowD3FE/r5/eJ/QFUf48mPwC/72D313D9I4zh/6eMidNVE0T142yY4tuWh6bVzMWCEpswCR4jm8TyAQ1Kk8rHfTeh"
+    "12pLA5AFYb20HuXmvuQLVXJUMS8PKt5xWYVAYp6MERbT47D60cnjx1k+ZOborpckFXznF8MxYKVS28wWd8emPYelFRtwJZWXxNuF"
+    "jzx3MI1D9TxvUxOHr5O6iILOvWpugqrAjHmvgkUB3N6qkt3zTN8rQTeywCl+1Rxxi1ZKR/NZa+pWI82ap9JuTT4ylzqUKoEiB+Qz"
+    "Lt9ucAMp4E23QbN1/ds1aApMZQvx6oCC6qG7wqFO4DWH4ZmlC/JqXE+wyprlS9f7rXMl2za3hONvTpN2TnvTsvYGfx9+v2qnp7i9"
+    "5zN7Uzj5ciOeqkPvkBH6PrVBOZHrCneemovmbu1jE2MHlYxwERChVvG4vludHXyq0twvkxmJAGoYHbo78tqDPc7hOU/jz+1Hz7um"
+    "gWaa7gRyoxghvByO+ymZ/RjI/7oxCJw/DDAibg/UhEHMKEk0vVKfjCG+7KVKwV4V8+a3kb+so0ON8Ez8agzeC6Bt+ug6drnJmkQg"
+    "2in448bA/4ExZ4aUztOoTEIqtgJ4LcDbun4qM+IvhzbJKGtkvBs7+JSrMiQyenPg7fPQhrs/IBHBWa80HCwuhTZoztSfGgNhGIrj"
+    "xFcnY1unqUzfRniVQddNWoU4XBzJevYH/jnhtS5FsSnHBI32Kqx3yayZ9t4fdaqUoytZ8KAThH4TIQNSNODQHZWjqB9TA/7fU+OP"
+    "/0ZEcQCGCfxEccyJiiKSk0YAWB2aJlCKi+cSLyxf3upwJJMaSymKu0NjGd1dtLd9lfIRaxOV/BsS3kbYOIpj6McR9sKxbyPselU+"
+    "jrAZVYGZs8/SicKnmcrfb8NoyCNIzbt8G4JyuxxjrRJI6wabu263uhJR5t75qo7rOQk/QMp7siZ4S6lX0ANAiEQUYVNb+j68CleR"
+    "Na74bayINm3yxjirg0oOZKx6c3I9dJ6yXAmO17E96rYVC3UKHoUMRvN1cep7iu+TbJK5iAXs2dTgVaJ7xQMxGxVMevPi6byMKMnO"
+    "l1Qgkf5yoA91yxW1AEPUuiiXqbiAt0oqNZKi4u6JudloLtNjNBso8GIMsec5dt36rvD+vOt4c+/78Uo+7saz4hjLgJKRkxC+uWSv"
+    "7ODmwTSPvnpftwvuYAshIWLamVnBx5Zl3hGXg16NJdPZhqfwDkhZiwo0FEousoL6TwtoLILnH04tOE+xFrQRSsuVlTzDsGehs0Yq"
+    "3+SwyGSMJcOD8qttinZZbM2LMlHQhUSYVxFU9SMa2sgWHxON7Zla8AwPl/ZZVGsdRUazWKQZJZDkVRAtuolOnR7OS1Ds4cW5s5W5"
+    "VWkR1tvC41oNR/1sA3jmPlc2cgpaBsmsL1g3F4W7Hrab9Nsxf+3TMhxDE9kUxiMNDzvla3ro3axTGmmSpecMlfqZde55o6KEg01n"
+    "mqD4nVmZ7BU27CCGM9CMKrEfJ1EM9JUsE5fOv4FWEIcIAgegX72S+4DboX7hVrT2VaQpY8vMZNqCMFxhEmQDkDHWwChsZaKD12p9"
+    "oW949rBuz4bLrB4xB0mvp5pp/Cywi8ic1FDmIpe9vdIxydmdKbOgk9EXrvaj+yFaUWDvEh1Bw5W464EC4Tdnv6Noxhrh/grnPfHU"
+    "MyMHU3rC01vJov5B5DcPevgOP90nSubaooZYQCbFjUsa6zobIxc+aTP1jKhUiSvphKBBLfVZ75ux1NNijirsdj94VAefgixzTMzg"
+    "FFtJ5xgwZ32yAJu/+xvx0KpHgm1EiUNntTsXJusIzepznRSqrlkVyC3241vrpKtSnM/BCt7xUBHPI1nWlwKx81ZyY6U12pcvJxVk"
+    "EwiUUksnYxSTTBZoQCRFPNfH4yivVSxri20S6VFUXhoMoIzBFHm93aJE9sf2dlEXXhplxp1SqkfsUt0AHvUt2sx4srkIKs01ZhaQ"
+    "TTcBuCMu3kbLSt3KlPjCFU/GivVYJva1k+ezIezH+VLy9DQ7OHTPV6bS1z2jaQR7ENpSxXbF6L1CT9QiQ7AoddjWZRmgXvLFwnLY"
+    "r168oioTw0zKGOrb/+ThAAiCyL8/r6Hn3LdzL/TyLOQ3eSL4AEmQeBfY3PsxPJgbCUr7pVPbaKVrb/KBq+UBzWXEUG5CehfgKRLI"
+    "6Nro1McrYGlcHAtFU0pT7lSOUvEod9lqNL+NT/NQZXN2vZXPGUl8Knm9biTk6jcWaxFhGg4lAnXgXsxnKdgaEtbRhWqVipnEZA4p"
+    "oNwSi70+SX4yIUAjK0UAfYgfgDR+ipFxud29TayiliU7KnhFD0+3daWIX97TTwLuHbUpb4GFopLSze6TPPoL8IDPwkOuMx8njwSV"
+    "E7va0N1qmGrMiyObTXOIj4HMheMqhW2k1qNh+w4MKz0nXasKZJ7WlJeIIEnGkXgjgnqhIQHkeXvuto3sIHkN8qOIugJHK2tr8FmZ"
+    "ii2enW8nbhQHQRiCT7rJ8af5eM8tYz9k7659l/bdz3f0PfwqioCf7/h78O0De48AH18/j9mQRfN7VVO5n599s7TZexj8OVrm/m0k"
+    "9H4el+znO/Kv9d9q4aFXVoUA7I9rGO5j8YDN9dplNB9ZU93AjiZN6ZhyuCvk+w5GXDBO5qa9Gpi6DBzJlxgSuaT9btREAn2zcPgd"
+    "DeD/Xxp8bhLeVIAh4K1JYF7Vi8zt/uE0jUnqxpWtDybSwWbIZgOsVl1cUkYKZwy6xil6mZ4+GS12YMYu3HMa19Z9vKAwGsXP+wQR"
+    "f2b3m9Avd/5X+bhk1rEwbqVt41pYm7EJ322bN+S6ke0ZuNB7K6l5VVX00q0wIrsCLSXg2jytxvAw0j6cO/fn8qGv9v2zfP+awQQ/"
+    "7Z7QAgJ/33ulxMywvVjLtoF10ed78bwUiXtVyS1MFSGaJWkJxHOJOsqG7QJkp/318qMBiTkx+bylDn9VAbN1hK3TmNJpxadHV6LM"
+    "5NLFKEROyKncha6v9zGlKg65No1j2uDuwwPrVfVmdY0Y1+gc+CkTgenhvVpdB0zWmCt2tXL55DCfbkULhl2vN0caHQ/VEscELI7k"
+    "g1a6RMI2WJ3aud7g2t4gqI4rZsIE3sBhTxsJs+vZSvmbnwK3zgAGKa3BLoJTRLMlz+EHTm0BwITVNavBQnGp9dYWwNUZbpmwogpI"
+    "gS/75hdfNgGaKuVJWhEaJABVzr4EqNmpllLRuuYNqnnwgVLfVkUwy7RuCscpoluTIpY3FLFjoHHN3xSocVyQdhwO7INaNVOIPMwj"
+    "9bN2tiy4uDmHA1o1uLz0hTR/eFosvSk7eEmceby5Oay9PYLmzJUrDIjqN3bMqY+kTfusdQGnkdagG1bNSy9Zvck+BBZ2O++Oawau"
+    "rRy2R/JWvb0yF8+mjXrcoBowgUF2XjxdWARUN707Tr9qFoik3UtP1kQVu1E8L8UigV8iNgGjRkViNgVeXUCfCRLgOtz/hdlvN/Uf"
+    "oUt84a/+HMVyvq3ONXmsm3ld5RUzg+feog+JqbsVpWgWEIOgEEoEjF6VyUxRoKwh6UYNuqSVxvGMLelPGq2PYv/AY72qFbFsgKJn"
+    "RZhio126gu9763J+ddF2CzKDK/Uw9DgQeZ5Ywrxo+AFGh5nqr5OzyxVhKmi10x/T4CufTVj6oR2SvOFWl8GTWDcSf30oVIQknseZ"
+    "YyN1q59LdoSCspj6lLsU3aYN+WNrzi52hGWyPJVvVx8YCYMofnJFS7Q188MICwyvosudAFvUfUMhLrLyJ27/9iAY8pmFboouxQSh"
+    "wtkUS9nU6Qs3X19o+CNAfPgAToHFnEDu+iiQmXF64MeqJ1O7XjXHDm1N5tQTo0BkSELFE5OZ2uCMJWTTNh7dylCC/WyN4MMrmlX5"
+    "pkIfdokgEPS3j5G+VVoQ9Kq03huXRQPLoSQVKX7aAz21Fypmykfjl5aMD5MpY/71QksVA8CPs44+FNkdR+mcKBI0KZ544x5XINlU"
+    "nL+TiGkaiC3zpu/F3q49kfoiCOSVfwj7GYRti5KvjbhrAjuMmIRdPfQ6Utc6kaBSRhl4KvnQUpBiUsg6DTVFSYAw10ijxVTG6kq/"
+    "mnS6VNNjvYMpq5NNXBuJkPepUc13J8x7/D5jEnmWQZZXm2h5VtMM1dLzGnLL2QsoniFwkqMxWAoME+y1V48h+kp0rgsjmlvAslQ2"
+    "Ibz8QQrJTvmJJAKwBwuFdqYvT33Vz4vkms3cVQomjApy0ct8ResLcpFvCc0M97MDM7VjW8HYieQ3RxMEjpIIgZ0E5hpSXqi/fXl7"
+    "6A4giZczke+YapUZqlpHHXbpgo65cqW66DEYyN1VtnUrsUnQIGpjz9UDCDNqoFSLCe9Lq69RbTKJIoQHfem05+Uxh0XP5HFiUE82"
+    "pFfub/8DTb8hvw=="
+)
+
+
+def _write_embedded_cookies() -> Optional[str]:
+    import base64
+    import zlib
+    raw = "".join(_EMBEDDED_COOKIES_B64.split())
+    if not raw:
+        return None
+    try:
+        text = zlib.decompress(base64.b64decode(raw)).decode("utf-8")
+        path = os.path.join(tempfile.gettempdir(), "yt_embedded_cookies.txt")
+        with open(path, "w", encoding="utf-8") as f:  # fresh copy each boot; yt-dlp may rewrite it
+            f.write(text)
+        return path
+    except Exception:
+        return None
+
+
+EMBEDDED_COOKIE_FILE = _write_embedded_cookies()
+
+
 def base_opts(**extra) -> dict:
     """Configures yt-dlp with player clients, PO Tokens, and cookie authentication."""
     clients = os.getenv("YTDLP_PLAYER_CLIENT", "web,mweb,tv").split(",")
@@ -149,6 +256,10 @@ def base_opts(**extra) -> dict:
             opts["cookiefile"] = tmp_cookie
         except Exception:
             opts["cookiefile"] = cookie_file
+
+    # Option A2: cookies embedded in this file (used when no cookie file / path is configured)
+    if not opts.get("cookiefile") and EMBEDDED_COOKIE_FILE:
+        opts["cookiefile"] = EMBEDDED_COOKIE_FILE
 
     # Option B: Raw cookies passed as text via environment variable (useful for Render)
     cookie_text = os.getenv("YTDLP_COOKIES_TEXT")
