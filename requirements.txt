@@ -1,5 +1,5 @@
-fastapi>=0.100.0
-uvicorn[standard]>=0.22.0
-git+https://github.com/yt-dlp/yt-dlp.git
-ytmusicapi>=1.8.0
-Pillow>=10.0.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+yt-dlp[default]>=2025.11.12
+ytmusicapi>=1.10
+pillow>=10.4
