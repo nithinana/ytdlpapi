@@ -13,9 +13,16 @@ Endpoints:
   GET /mood?name=Relax                Mood feeds
   GET /health                         Health check & ffmpeg status
 
-Deployment on Render:
-  Build Command: pip install -r requirements.txt
-  Start Command: uvicorn champa:app --host 0.0.0.0 --port $PORT
+Deployment on Render (Docker runtime, so ffmpeg + node are available):
+  Dockerfile and requirements.txt sit next to this file. Render sets $PORT.
+  Health check path: /health
+
+Why this differs from the localhost version:
+  * YouTube audio URLs are locked to the IP that requested them. On localhost the
+    server and browser share an IP, on Render they don't, so /stream hands back a
+    URL on THIS server (/audio/{id}) which proxies the bytes (Range supported).
+  * Datacenter IPs get bot-checked more, so set cookies / PO token / proxy via env.
+  * If ffmpeg is missing, /download falls back to the native format instead of 500.
 """
 
 import io
@@ -27,8 +34,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache, wraps
 from typing import Optional
+from urllib.error import HTTPError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request as UrlRequest, build_opener, urlopen
 
 import yt_dlp
 
@@ -37,9 +45,9 @@ try:
 except ImportError:  # covers still work, just without auto-cropping
     Image = ImageChops = None
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 API_KEY = os.getenv("API_KEY")  # optional: set X-API-Key header in Render env vars
@@ -114,10 +122,21 @@ def base_opts(**extra) -> dict:
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
+        "socket_timeout": 20,
+        "retries": 2,
+        "extractor_retries": 1,
         "extractor_args": {
             "youtube": youtube_args,
         },
     }
+
+    # YouTube now needs a JS runtime to solve its "n challenge" (otherwise: no formats / 403).
+    runtimes = {name: {} for name in ("deno", "node") if shutil.which(name)}
+    if runtimes:
+        opts["js_runtimes"] = runtimes
+    remote = os.getenv("YTDLP_REMOTE_COMPONENTS", "ejs:github")
+    if remote:
+        opts["remote_components"] = [c for c in remote.split(",") if c]
 
     # Option A: Cookie file (env path, or cookies.txt bundled next to this script).
     # Copied to /tmp because yt-dlp writes cookies back and the repo dir may be read-only.
@@ -175,7 +194,10 @@ def extract(url: str, opts: dict, download: bool = False) -> dict:
     current = ",".join(opts.get("extractor_args", {}).get("youtube", {}).get("player_client", []))
     attempts = [None] + [c for c in CLIENT_FALLBACKS if c != current]
     last = None
+    started = time.time()
     for clients in attempts:
+        if last and time.time() - started > 70:   # stay under the platform request timeout
+            break
         o = copy.deepcopy(opts)
         if clients:
             o.setdefault("extractor_args", {}).setdefault("youtube", {})["player_client"] = clients.split(",")
@@ -449,22 +471,116 @@ def track(video_id: str):
     }
 
 
-@app.get("/stream/{video_id}", dependencies=[Depends(require_key)])
-def stream(video_id: str):
-    """Best direct audio stream URL."""
-    check_video_id(video_id)
-    info = extract(
-        f"https://www.youtube.com/watch?v={video_id}",
-        base_opts(format="bestaudio/best/ba*/b*"),
-    )
-    return {
-        **track_summary(info),
-        "audio_url": info.get("url"),
-        "ext": info.get("ext"),
-        "abr": info.get("abr"),
-        "acodec": info.get("acodec"),
-        "filesize": info.get("filesize") or info.get("filesize_approx"),
+AUDIO_FORMAT = "bestaudio[protocol^=http][protocol!*=m3u8]/bestaudio[protocol!*=m3u8]/bestaudio/best/ba*/b*"
+_audio_cache: dict = {}
+_AUDIO_TTL = 1500  # googlevideo URLs live for hours; refresh well before that
+
+
+def _resolve_audio(video_id: str, force: bool = False) -> dict:
+    hit = _audio_cache.get(video_id)
+    if hit and not force and time.time() - hit["t"] < _AUDIO_TTL:
+        return hit
+    info = extract(f"https://www.youtube.com/watch?v={video_id}", base_opts(format=AUDIO_FORMAT))
+    entry = {
+        "t": time.time(),
+        "url": info.get("url"),
+        "headers": info.get("http_headers") or {},
+        "protocol": info.get("protocol") or "",
+        "meta": {
+            **track_summary(info),
+            "ext": info.get("ext"),
+            "abr": info.get("abr"),
+            "acodec": info.get("acodec"),
+            "filesize": info.get("filesize") or info.get("filesize_approx"),
+        },
     }
+    _audio_cache[video_id] = entry
+    if len(_audio_cache) > 200:
+        _audio_cache.pop(next(iter(_audio_cache)))
+    return entry
+
+
+def _public_base(request: Request) -> str:
+    env = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL")  # Render sets the latter
+    if env:
+        return env.rstrip("/")
+    h = request.headers
+    scheme = (h.get("x-forwarded-proto") or request.url.scheme).split(",")[0].strip()
+    host = (h.get("x-forwarded-host") or h.get("host") or request.url.netloc).split(",")[0].strip()
+    return f"{scheme}://{host}"
+
+
+@app.get("/stream/{video_id}", dependencies=[Depends(require_key)])
+def stream(video_id: str, request: Request):
+    """Playable audio URL. Proxied through this server so it works from any client IP."""
+    check_video_id(video_id)
+    e = _resolve_audio(video_id)
+    if not e["url"]:
+        raise HTTPException(502, "No playable audio stream found for this track")
+    if os.getenv("DIRECT_STREAM") == "1":  # localhost only: hand out the raw googlevideo URL
+        audio_url = e["url"]
+    else:
+        audio_url = f"{_public_base(request)}/audio/{video_id}"
+        if API_KEY:
+            audio_url += f"?key={quote(API_KEY)}"
+    return {**e["meta"], "audio_url": audio_url}
+
+
+def _upstream_opener():
+    proxy = os.getenv("YTDLP_PROXY")  # googlevideo URLs are tied to the proxy IP too
+    return build_opener(ProxyHandler({"http": proxy, "https": proxy})) if proxy else build_opener()
+
+
+_PASS_HEADERS = ("content-type", "content-length", "content-range", "accept-ranges")
+
+
+@app.get("/audio/{video_id}", include_in_schema=False)
+def audio(video_id: str, request: Request, key: Optional[str] = Query(default=None)):
+    """Byte-range proxy for the audio stream (the <audio> element can't send X-API-Key)."""
+    check_video_id(video_id)
+    if API_KEY and key != API_KEY and request.headers.get("x-api-key") != API_KEY:
+        raise HTTPException(401, "Invalid or missing key")
+    rng = request.headers.get("range")
+    up = None
+    for attempt in (0, 1):
+        e = _resolve_audio(video_id, force=bool(attempt))
+        if not e["url"]:
+            raise HTTPException(502, "No playable audio stream found for this track")
+        if "m3u8" in e["protocol"] or ".m3u8" in e["url"]:
+            return RedirectResponse(e["url"])          # HLS can't be byte-proxied
+        h = {k: v for k, v in e["headers"].items() if k.lower() not in ("accept-encoding", "range", "host")}
+        h.setdefault("User-Agent", "Mozilla/5.0")
+        if rng:
+            h["Range"] = rng
+        try:
+            up = _upstream_opener().open(UrlRequest(e["url"], headers=h), timeout=25)
+            break
+        except HTTPError as err:
+            if err.code == 416:
+                return Response(status_code=416, headers={"Content-Range": err.headers.get("Content-Range", "")})
+            if err.code in (403, 404, 410) and attempt == 0:
+                _audio_cache.pop(video_id, None)       # expired / blocked: re-resolve once
+                continue
+            raise HTTPException(502, f"Upstream audio error {err.code}")
+        except Exception as err:
+            raise HTTPException(502, f"Upstream audio error: {err}")
+
+    headers = {k: up.headers[k] for k in _PASS_HEADERS if up.headers.get(k)}
+    headers.setdefault("Accept-Ranges", "bytes")
+    headers["Cache-Control"] = "no-store"
+
+    def body():
+        try:
+            while True:
+                chunk = up.read(64 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            up.close()
+
+    return StreamingResponse(body(), status_code=up.status, headers=headers,
+                             media_type=headers.pop("content-type", None) or up.headers.get_content_type())
 
 
 def _cleanup(path: str):
@@ -487,15 +603,14 @@ def download(
     tmp = tempfile.mkdtemp(prefix="ytm_")
     opts = base_opts(
         skip_download=False,
-        format="bestaudio/best/ba*/b*",
+        format="bestaudio[protocol!*=m3u8]/bestaudio/best/ba*/b*",
         outtmpl=os.path.join(tmp, "%(artist,uploader)s - %(title)s.%(ext)s"),
         restrictfilenames=True,
         writethumbnail=False,
     )
+    if fmt != "best" and not shutil.which("ffmpeg"):
+        fmt = "best"  # no ffmpeg on this host: hand back the native audio file instead of failing
     if fmt != "best":
-        if not shutil.which("ffmpeg"):
-            _cleanup(tmp)
-            raise HTTPException(500, "ffmpeg not found on Render server; use fmt=best or configure ffmpeg buildpack")
         opts["postprocessors"] = [
             {"key": "FFmpegExtractAudio", "preferredcodec": fmt, "preferredquality": quality},
             {"key": "FFmpegMetadata", "add_metadata": True},
@@ -550,11 +665,11 @@ def playlist(playlist_id: str, limit: int = Query(100, ge=1, le=500)):
 
 
 # ---- Cover art (auto-cropped to a square) ------------------------------------
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=64)
 def _fetch_thumb(vid: str):
     for name in ("maxresdefault", "sddefault", "hqdefault", "mqdefault"):
         try:
-            req = Request(f"https://i.ytimg.com/vi/{vid}/{name}.jpg", headers={"User-Agent": "Mozilla/5.0"})
+            req = UrlRequest(f"https://i.ytimg.com/vi/{vid}/{name}.jpg", headers={"User-Agent": "Mozilla/5.0"})
             with urlopen(req, timeout=10) as r:
                 data = r.read()
             if len(data) > 2000:
@@ -584,7 +699,7 @@ def _trim_borders(img, tol: int = 28):
     return img
 
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=256)
 def _cover_bytes(vid: str, size: int):
     raw = _fetch_thumb(vid)
     if raw is None or Image is None:
