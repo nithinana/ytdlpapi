@@ -1,7 +1,7 @@
 """
-YouTube Music API powered by yt-dlp + FastAPI.
+YouTube Music API powered by yt-dlp + FastAPI (Render Deployment Ready).
 
-Endpoints
+Endpoints:
   GET /search?q=...&type=songs|albums|artists|playlists&limit=20
   GET /album/{browse_id}              Album + tracks
   GET /artist/{channel_id}            Artist: top songs, albums, singles
@@ -10,9 +10,12 @@ Endpoints
   GET /stream/{video_id}              Direct audio URL (expires after a few hours)
   GET /download/{video_id}?fmt=mp3    Download audio file (needs ffmpeg for conversion)
   GET /playlist/{playlist_id}         Playlist / album track list
+  GET /mood?name=Relax                Mood feeds
+  GET /health                         Health check & ffmpeg status
 
-Run:  uvicorn main:app --reload
-Docs: http://127.0.0.1:8000/docs
+Deployment on Render:
+  Build Command: pip install -r requirements.txt
+  Start Command: uvicorn champa:app --host 0.0.0.0 --port $PORT
 """
 
 import io
@@ -23,9 +26,9 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from urllib.request import Request, urlopen
 from typing import Optional
 from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import yt_dlp
 
@@ -33,12 +36,13 @@ try:
     from PIL import Image, ImageChops
 except ImportError:  # covers still work, just without auto-cropping
     Image = ImageChops = None
+
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 
-API_KEY = os.getenv("API_KEY")  # optional: set to require X-API-Key header
+API_KEY = os.getenv("API_KEY")  # optional: set X-API-Key header in Render env vars
 MUSIC_URL = "https://music.youtube.com"
 VIDEO_ID_RE = re.compile(r"^[\w-]{11}$")
 PLAYLIST_ID_RE = re.compile(r"^[\w-]{10,64}$")
@@ -47,8 +51,7 @@ ALLOWED_FORMATS = {"mp3", "m4a", "opus", "flac", "wav", "best"}
 
 app = FastAPI(title="YouTube Music API", version="1.0.0")
 
-# Lets index.html work even when opened straight from disk (file://).
-# Tighten allow_origins if you expose this beyond localhost.
+# Enables CORS for frontend apps or direct browser access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,7 +63,10 @@ app.add_middleware(
 
 @app.get("/", include_in_schema=False)
 def gui():
-    return FileResponse(os.path.join(os.path.dirname(__file__), "index.html"))
+    index_path = os.path.join(os.path.dirname(__file__), "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"status": "online", "message": "YouTube Music API is running."}
 
 
 def require_key(x_api_key: Optional[str] = Header(default=None)):
@@ -69,23 +75,47 @@ def require_key(x_api_key: Optional[str] = Header(default=None)):
 
 
 def base_opts(**extra) -> dict:
-    # Use iOS/Mobile player clients by default to bypass YouTube bot detection
-    clients = os.getenv("YTDLP_PLAYER_CLIENT", "ios,mweb,android").split(",")
+    """Configures yt-dlp with player clients, PO Tokens, and cookie authentication."""
+    clients = os.getenv("YTDLP_PLAYER_CLIENT", "mweb,ios,android").split(",")
+    youtube_args = {
+        "player_client": clients,
+    }
+
+    # Pass Proof-of-Origin (PO) Token if configured in Render environment
+    po_token = os.getenv("YTDLP_PO_TOKEN")
+    visitor_data = os.getenv("YTDLP_VISITOR_DATA")
+    if po_token:
+        youtube_args["po_token"] = [po_token]
+    if visitor_data:
+        youtube_args["visitor_data"] = [visitor_data]
+
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "skip_download": True,
         "extractor_args": {
-            "youtube": {
-                "player_client": clients,
-            }
+            "youtube": youtube_args,
         },
     }
-    # Optional: export YTDLP_COOKIES=/path/to/cookies.txt
-    if os.getenv("YTDLP_COOKIES"):
-        opts["cookiefile"] = os.getenv("YTDLP_COOKIES")
-    # Optional: export YTDLP_COOKIES_FROM_BROWSER=chrome or firefox
+
+    # Option A: Cookie file path
+    cookie_file = os.getenv("YTDLP_COOKIES")
+    if cookie_file and os.path.exists(cookie_file):
+        opts["cookiefile"] = cookie_file
+
+    # Option B: Raw cookies passed as text via environment variable (useful for Render)
+    cookie_text = os.getenv("YTDLP_COOKIES_TEXT")
+    if cookie_text and not opts.get("cookiefile"):
+        tmp_cookie = os.path.join(tempfile.gettempdir(), "render_yt_cookies.txt")
+        try:
+            with open(tmp_cookie, "w", encoding="utf-8") as f:
+                f.write(cookie_text)
+            opts["cookiefile"] = tmp_cookie
+        except Exception:
+            pass
+
+    # Option C: Browser cookies (local environments)
     if os.getenv("YTDLP_COOKIES_FROM_BROWSER"):
         browser_spec = os.getenv("YTDLP_COOKIES_FROM_BROWSER").split(":")
         opts["cookiesfrombrowser"] = tuple(browser_spec)
@@ -105,7 +135,8 @@ def extract(url: str, opts: dict, download: bool = False) -> dict:
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.extract_info(url, download=download)
     except yt_dlp.utils.DownloadError as e:
-        raise HTTPException(502, f"yt-dlp error: {re.sub(r'\x1b\[[0-9;]*m', '', str(e))}")
+        clean_err = re.sub(r"\x1b\[[0-9;]*m", "", str(e))
+        raise HTTPException(502, f"yt-dlp error: {clean_err}")
 
 
 def thumb(info: dict) -> Optional[str]:
@@ -270,7 +301,7 @@ def search(
     type: str = Query("songs", description="songs, albums, artists or playlists"),
     limit: int = Query(20, ge=1, le=50),
 ):
-    """Search YouTube Music for songs (audio tracks, not videos), albums, artists or playlists."""
+    """Search YouTube Music for songs, albums, artists or playlists."""
     if type not in SEARCH_TYPES:
         raise HTTPException(400, f"type must be one of {sorted(SEARCH_TYPES)}")
     if YTMusic is None:
@@ -297,12 +328,12 @@ def album(browse_id: str):
     for x in _audio_only(a.get("tracks") or []):
         t = _track(x, thumb=thumb, artist=artist, album=a.get("title"), album_id=browse_id)
         if t:
-            t["thumbnail"] = thumb or t["thumbnail"]  # every track shows the album art
+            t["thumbnail"] = thumb or t["thumbnail"]
             t["artists"] = t["artists"] or arts
             t["album_id"] = browse_id
             tracks.append(t)
     more = []
-    if arts and arts[0].get("id"):  # other releases by the same artist
+    if arts and arts[0].get("id"):
         try:
             ar = ytm().get_artist(arts[0]["id"])
             for key in ("albums", "singles"):
@@ -326,7 +357,7 @@ def artist(channel_id: str):
     block = a.get("songs") or {}
     raw = block.get("results") or []
     bid = block.get("browseId")
-    if bid:  # the artist's full "top songs" list instead of just the first few
+    if bid:
         try:
             full = ytm().get_playlist(bid[2:] if bid.startswith("VL") else bid, limit=50)
             if full.get("tracks"):
@@ -368,7 +399,7 @@ def track(video_id: str):
 
 @app.get("/stream/{video_id}", dependencies=[Depends(require_key)])
 def stream(video_id: str):
-    """Best direct audio stream URL (temporary; tied to the requesting IP)."""
+    """Best direct audio stream URL."""
     check_video_id(video_id)
     info = extract(
         f"{MUSIC_URL}/watch?v={video_id}", base_opts(format="bestaudio/best")
@@ -411,7 +442,7 @@ def download(
     if fmt != "best":
         if not shutil.which("ffmpeg"):
             _cleanup(tmp)
-            raise HTTPException(500, "ffmpeg not found on server; use fmt=best or install ffmpeg")
+            raise HTTPException(500, "ffmpeg not found on Render server; use fmt=best or configure ffmpeg buildpack")
         opts["postprocessors"] = [
             {"key": "FFmpegExtractAudio", "preferredcodec": fmt, "preferredquality": quality},
             {"key": "FFmpegMetadata", "add_metadata": True},
@@ -435,7 +466,7 @@ def download(
 
 @app.get("/playlist/{playlist_id}", dependencies=[Depends(require_key)])
 def playlist(playlist_id: str, limit: int = Query(100, ge=1, le=500)):
-    """Tracks in a YouTube Music playlist (incl. official RDCLAK5uy_... ones) or album playlist."""
+    """Tracks in a YouTube Music playlist or album playlist."""
     if not PLAYLIST_ID_RE.match(playlist_id):
         raise HTTPException(400, "Invalid playlist id")
     if YTMusic is not None:
@@ -451,7 +482,7 @@ def playlist(playlist_id: str, limit: int = Query(100, ge=1, le=500)):
                     "thumbnail": _best_thumb(p.get("thumbnails")), "track_count": len(tracks), "tracks": tracks,
                 }
         except Exception:
-            pass  # fall through to yt-dlp
+            pass
     info = extract(
         f"{MUSIC_URL}/playlist?list={playlist_id}",
         base_opts(extract_flat=True, noplaylist=False, playlistend=limit),
@@ -480,8 +511,6 @@ def _fetch_thumb(vid: str):
 
 
 def _trim_borders(img, tol: int = 28):
-    """Strip uniform-colour bars (letterbox / side bars), a few passes since
-    the top/bottom and left/right bars are often different colours."""
     start = img.size
     for _ in range(3):
         w, h = img.size
@@ -491,10 +520,10 @@ def _trim_borders(img, tol: int = 28):
         if not box or box == (0, 0, w, h):
             break
         l, t, r, b = box
-        if (r - l) < w * 0.3 or (b - t) < h * 0.3:  # looks like we'd eat the artwork; bail
+        if (r - l) < w * 0.3 or (b - t) < h * 0.3:
             break
         img = img.crop(box)
-    if img.size != start:  # shave a couple of px to drop JPEG fringing at the edge
+    if img.size != start:
         w, h = img.size
         if w > 8 and h > 8:
             img = img.crop((2, 2, w - 2, h - 2))
@@ -519,7 +548,7 @@ def _cover_bytes(vid: str, size: int):
 
 @app.get("/cover/{video_id}", include_in_schema=False)
 def cover(video_id: str, s: int = Query(400, ge=64, le=1000)):
-    """Square, border-free cover art. Public (no API key) so <img> tags can load it."""
+    """Square, border-free cover art."""
     check_video_id(video_id)
     data = _cover_bytes(video_id, s)
     if data is None:
@@ -547,7 +576,7 @@ HOME_FALLBACK = [("kollywood", "Kollywood Hitlist", [f"{MUSIC_URL}/playlist?list
 _home_cache = {"t": 0.0, "data": None}
 
 
-def _load_section(sec):  # yt-dlp fallback loader
+def _load_section(sec):
     sid, title, sources = sec
     for src in sources:
         try:
@@ -605,7 +634,7 @@ def home(refresh: bool = False):
     note = None
     if YTMusic is None:
         sections = [_load_section(s) for s in HOME_FALLBACK]
-        note = "Install ytmusicapi (pip install ytmusicapi) for the full Tamil home feed."
+        note = "Install ytmusicapi for the full Tamil home feed."
     else:
         with ThreadPoolExecutor(max_workers=4) as pool:
             sections = list(pool.map(_load_home_section, HOME_PLAN))
@@ -630,7 +659,7 @@ _mood_cache: dict = {}
 
 @app.get("/mood", dependencies=[Depends(require_key)])
 def mood(name: str = Query(...)):
-    """Tamil-leaning rows for a mood chip (Relax, Party, Romance, ...)."""
+    """Tamil-leaning rows for a mood chip."""
     if name not in MOODS:
         raise HTTPException(400, f"name must be one of {MOODS}")
     hit = _mood_cache.get(name)
@@ -664,10 +693,15 @@ def mood(name: str = Query(...)):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "yt_dlp": yt_dlp.version.__version__, "ffmpeg": bool(shutil.which("ffmpeg"))}
+    return {
+        "status": "ok",
+        "yt_dlp": yt_dlp.version.__version__,
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+    }
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
