@@ -402,7 +402,7 @@ def stream(video_id: str):
     """Best direct audio stream URL."""
     check_video_id(video_id)
     info = extract(
-        f"{MUSIC_URL}/watch?v={video_id}", base_opts(format="bestaudio/best")
+        f"{MUSIC_URL}/watch?v={video_id}", base_opts(format="bestaudio/best/ba/b")
     )
     return {
         **track_summary(info),
@@ -434,7 +434,7 @@ def download(
     tmp = tempfile.mkdtemp(prefix="ytm_")
     opts = base_opts(
         skip_download=False,
-        format="bestaudio/best",
+        format="bestaudio/best/ba/b",
         outtmpl=os.path.join(tmp, "%(artist,uploader)s - %(title)s.%(ext)s"),
         restrictfilenames=True,
         writethumbnail=False,
