@@ -25,7 +25,7 @@ import shutil
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from functools import lru_cache, wraps
 from typing import Optional
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -67,6 +67,26 @@ def gui():
     if os.path.exists(index_path):
         return FileResponse(index_path)
     return {"status": "online", "message": "YouTube Music API is running."}
+
+
+def ttl_cache(ttl: int = 900, maxsize: int = 300):
+    """Tiny in-memory cache so repeat album/artist/playlist opens are instant."""
+    def deco(fn):
+        store: dict = {}
+
+        @wraps(fn)
+        def wrapper(*a, **kw):
+            key = (a, tuple(sorted(kw.items())))
+            hit = store.get(key)
+            if hit and time.time() - hit[0] < ttl:
+                return hit[1]
+            val = fn(*a, **kw)  # exceptions are not cached
+            store[key] = (time.time(), val)
+            if len(store) > maxsize:
+                store.pop(next(iter(store)))
+            return val
+        return wrapper
+    return deco
 
 
 def require_key(x_api_key: Optional[str] = Header(default=None)):
@@ -348,6 +368,7 @@ def search(
 
 
 @app.get("/album/{browse_id}", dependencies=[Depends(require_key)])
+@ttl_cache()
 def album(browse_id: str):
     check_id(browse_id)
     a = ytm_call("get_album", browse_id)
@@ -381,6 +402,7 @@ def album(browse_id: str):
 
 
 @app.get("/artist/{channel_id}", dependencies=[Depends(require_key)])
+@ttl_cache()
 def artist(channel_id: str):
     check_id(channel_id)
     a = ytm_call("get_artist", channel_id)
@@ -496,6 +518,7 @@ def download(
 
 
 @app.get("/playlist/{playlist_id}", dependencies=[Depends(require_key)])
+@ttl_cache()
 def playlist(playlist_id: str, limit: int = Query(100, ge=1, le=500)):
     """Tracks in a YouTube Music playlist or album playlist."""
     if not PLAYLIST_ID_RE.match(playlist_id):
