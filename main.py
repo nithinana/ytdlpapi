@@ -76,7 +76,7 @@ def require_key(x_api_key: Optional[str] = Header(default=None)):
 
 def base_opts(**extra) -> dict:
     """Configures yt-dlp with player clients, PO Tokens, and cookie authentication."""
-    clients = os.getenv("YTDLP_PLAYER_CLIENT", "android,ios,mweb").split(",")
+    clients = os.getenv("YTDLP_PLAYER_CLIENT", "web,mweb,tv").split(",")
     youtube_args = {
         "player_client": clients,
     }
@@ -99,10 +99,17 @@ def base_opts(**extra) -> dict:
         },
     }
 
-    # Option A: Cookie file path
-    cookie_file = os.getenv("YTDLP_COOKIES")
-    if cookie_file and os.path.exists(cookie_file):
-        opts["cookiefile"] = cookie_file
+    # Option A: Cookie file (env path, or cookies.txt bundled next to this script).
+    # Copied to /tmp because yt-dlp writes cookies back and the repo dir may be read-only.
+    cookie_file = os.getenv("YTDLP_COOKIES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+    if os.path.exists(cookie_file):
+        tmp_cookie = os.path.join(tempfile.gettempdir(), "yt_cookies_copy.txt")
+        try:
+            if not os.path.exists(tmp_cookie):
+                shutil.copyfile(cookie_file, tmp_cookie)
+            opts["cookiefile"] = tmp_cookie
+        except Exception:
+            opts["cookiefile"] = cookie_file
 
     # Option B: Raw cookies passed as text via environment variable (useful for Render)
     cookie_text = os.getenv("YTDLP_COOKIES_TEXT")
