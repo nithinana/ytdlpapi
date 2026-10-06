@@ -1,6 +1,4 @@
 """
-YouTube Music API powered by yt-dlp + FastAPI (Render Deployment Ready).
-
 Endpoints:
   GET /search?q=...&type=songs|albums|artists|playlists&limit=20
   GET /album/{browse_id}              Album + tracks
@@ -8,6 +6,8 @@ Endpoints:
   GET /home                           Tamil / India home feed (songs, playlists, albums, artists)
   GET /track/{video_id}               Track metadata
   GET /stream/{video_id}              Direct audio URL (expires after a few hours)
+  GET /sources/{video_id}?probe=false List every source (client + format) with a network stream link each
+  GET /stream/{video_id}?client=&fmt= Pin a specific source from /sources
   GET /download/{video_id}?fmt=mp3    Download audio file (needs ffmpeg for conversion)
   GET /playlist/{playlist_id}         Playlist / album track list
   GET /mood?name=Relax                Mood feeds
@@ -40,7 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache, wraps
 from typing import Optional
 from urllib.error import HTTPError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import ProxyHandler, Request as UrlRequest, build_opener, urlopen
 
 import yt_dlp
@@ -138,7 +138,8 @@ EMBEDDED_COOKIE_FILE = _write_embedded_cookies()
 
 def base_opts(**extra) -> dict:
     """Configures yt-dlp with player clients, PO Tokens, and cookie authentication."""
-    clients = os.getenv("YTDLP_PLAYER_CLIENT", "web,mweb,tv").split(",")
+    # Changed default from "web,mweb,tv" to mobile clients
+    clients = os.getenv("YTDLP_PLAYER_CLIENT", "android,ios,mweb").split(",")
     youtube_args = {
         "player_client": clients,
     }
@@ -509,8 +510,24 @@ def track(video_id: str):
     }
 
 
-AUDIO_FORMAT = "bestaudio[protocol^=http][protocol!*=m3u8]/bestaudio[protocol!*=m3u8]/bestaudio/best/ba*/b*"
+AUDIO_FORMAT = "bestaudio[protocol^=http][protocol!*=m3u8]/bestaudio/best/ba*/b"
 _audio_cache: dict = {}
+CHUNK = 10 * 1024 * 1024  # googlevideo max ranged chunk
+_FMT_RE = re.compile(r"^[\w\-\.\+]{1,60}$")
+_CLIENT_RE = re.compile(r"^[\w,]{1,60}$")
+
+
+def _akey(video_id: str, client: Optional[str] = None, fmt: Optional[str] = None) -> tuple:
+    return (video_id, client or "", fmt or "")
+
+
+def _check_src(client: Optional[str], fmt: Optional[str]):
+    if client and not _CLIENT_RE.match(client):
+        raise HTTPException(400, "Invalid client")
+    if fmt and not _FMT_RE.match(fmt):
+        raise HTTPException(400, "Invalid fmt")
+
+
 _AUDIO_TTL = 1500  # googlevideo URLs live for hours; refresh well before that
 
 
@@ -528,9 +545,9 @@ def _upstream_opener():
 
 def _probe(url: str, headers: dict) -> bool:
     """Tiny ranged request: does YouTube actually serve this URL to us?"""
-    h = {k: v for k, v in (headers or {}).items() if k.lower() not in ("accept-encoding", "range", "host")}
-    h.setdefault("User-Agent", "Mozilla/5.0")
-    h["Range"] = "bytes=0-1"
+    h = {k: v for k, v in headers.items() if k.lower() not in ("accept-encoding", "range", "host")}
+    h.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    h["Range"] = f"bytes=0-{CHUNK - 1}"   # same shape as the real proxy request; a 2-byte probe gave false "playable"
     try:
         with _upstream_opener().open(UrlRequest(url, headers=h), timeout=12) as r:
             r.read(2)
@@ -539,17 +556,23 @@ def _probe(url: str, headers: dict) -> bool:
         return False
 
 
-def _resolve_audio(video_id: str, force: bool = False) -> dict:
-    hit = _audio_cache.get(video_id)
+def _resolve_audio(video_id: str, force: bool = False, client: Optional[str] = None, fmt: Optional[str] = None) -> dict:
+    """Auto mode picks the best playable audio. With client/fmt it resolves exactly that source."""
+    key = _akey(video_id, client, fmt)
+    pinned = bool(client or fmt)
+    hit = _audio_cache.get(key)
     if hit and not force and time.time() - hit["t"] < _AUDIO_TTL:
         return hit
     url = f"https://www.youtube.com/watch?v={video_id}"
     audio_only = playable_mixed = any_info = None
     last, started = None, time.time()
-    for clients in AUDIO_CLIENTS:
+    simple = not pinned
+    if simple:   # same as main.py: one extract, falls back to the muxed mp4 when no audio-only stream exists
+        any_info = extract(url, base_opts(format=AUDIO_FORMAT))
+    for clients in ([] if simple else ([client] if client else AUDIO_CLIENTS)):
         if time.time() - started > 60:
             break
-        opts = base_opts(format=AUDIO_FORMAT)
+        opts = base_opts(format=fmt or AUDIO_FORMAT)
         opts["extractor_args"]["youtube"]["player_client"] = clients.split(",")
         if clients.split(",")[0] == "android_vr":
             opts.pop("cookiefile", None)       # android_vr doesn't support cookies; yt-dlp would skip it
@@ -563,8 +586,11 @@ def _resolve_audio(video_id: str, force: bool = False) -> dict:
             continue
         any_info = any_info or info
         is_audio = info.get("vcodec") in (None, "none")
-        ok = _probe(info["url"], info.get("http_headers"))
+        ok = True if pinned else _probe(info["url"], info.get("http_headers"))
         print(f"[resolve] {video_id}: client={clients} format={info.get('format_id')} audio_only={is_audio} playable={ok}", flush=True)
+        if pinned:
+            audio_only = info          # caller chose this source explicitly
+            break
         if ok and is_audio:
             audio_only = info
             break
@@ -590,11 +616,10 @@ def _resolve_audio(video_id: str, force: bool = False) -> dict:
             "filesize": info.get("filesize") or info.get("filesize_approx"),
         },
     }
-    _audio_cache[video_id] = entry
+    _audio_cache[key] = entry
     if len(_audio_cache) > 200:
         _audio_cache.pop(next(iter(_audio_cache)))
     return entry
-
 
 def _public_base(request: Request) -> str:
     env = os.getenv("PUBLIC_URL") or os.getenv("RENDER_EXTERNAL_URL")  # Render sets the latter
@@ -606,30 +631,153 @@ def _public_base(request: Request) -> str:
     return f"{scheme}://{host}"
 
 
+def _audio_link(request: Request, video_id: str, client: Optional[str] = None, fmt: Optional[str] = None) -> str:
+    q = {}
+    if client:
+        q["client"] = client
+    if fmt:
+        q["fmt"] = fmt
+    if API_KEY:
+        q["key"] = API_KEY
+    return f"{_public_base(request)}/audio/{video_id}" + (f"?{urlencode(q, quote_via=quote)}" if q else "")
+
+
 @app.get("/stream/{video_id}", dependencies=[Depends(require_key)])
-def stream(video_id: str, request: Request):
+def stream(
+    video_id: str,
+    request: Request,
+    client: Optional[str] = Query(default=None, description="pin a player client, see /sources"),
+    fmt: Optional[str] = Query(default=None, description="pin a format_id, see /sources"),
+):
     """Playable audio URL. Proxied through this server so it works from any client IP."""
     check_video_id(video_id)
-    e = _resolve_audio(video_id)
+    _check_src(client, fmt)
+    e = _resolve_audio(video_id, client=client, fmt=fmt)
     if not e["url"]:
         raise HTTPException(502, "No playable audio stream found for this track")
     if os.getenv("DIRECT_STREAM") == "1":  # localhost only: hand out the raw googlevideo URL
         audio_url = e["url"]
     else:
-        audio_url = f"{_public_base(request)}/audio/{video_id}"
-        if API_KEY:
-            audio_url += f"?key={quote(API_KEY)}"
-    return {**e["meta"], "audio_url": audio_url}
+        audio_url = _audio_link(request, video_id, client, fmt)
+    return {**e["meta"], "audio_url": audio_url, "sources_url": f"{_public_base(request)}/sources/{video_id}"}
 
 
-CHUNK = 10 * 1024 * 1024  # googlevideo max ranged chunk
+def _list_client_formats(video_id: str, clients: str) -> dict:
+    """All formats one player-client combo exposes (no format selection, so it never fails with 'not available')."""
+    opts = base_opts(ignore_no_formats_error=True)
+    opts["extractor_args"]["youtube"]["player_client"] = clients.split(",")
+    if clients.split(",")[0] == "android_vr":
+        opts.pop("cookiefile", None)
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False) or {}
+    except yt_dlp.utils.DownloadError as e:
+        return {"client": clients, "error": re.sub(r"\x1b\[[0-9;]*m", "", str(e)).strip(), "formats": []}
+    return {"client": clients, "info": info, "formats": info.get("formats") or []}
+
+
+@app.get("/sources/{video_id}", dependencies=[Depends(require_key)])
+def sources(
+    video_id: str,
+    request: Request,
+    probe: bool = Query(False, description="test each source against YouTube and report playable true/false (slower)"),
+    audio_only: bool = Query(False, description="hide sources that contain video"),
+    direct: bool = Query(False, description="also include the raw googlevideo URL (IP-locked to this server)"),
+):
+    """Every audio/video source YouTube exposes for this id, per player client, each with a network stream link.
+
+    stream_url goes through this server (/audio) so it plays from any IP. Pass a source's
+    `client` and `format_id` to /stream or /audio to pin it.
+    """
+    check_video_id(video_id)
+    started = time.time()
+    with ThreadPoolExecutor(max_workers=min(len(AUDIO_CLIENTS), 6) or 1) as ex:
+        results = list(ex.map(lambda c: _list_client_formats(video_id, c), AUDIO_CLIENTS))
+
+    out, errors, meta, seen = [], {}, None, set()
+    for r in results:
+        if r.get("error"):
+            errors[r["client"]] = r["error"]
+        if r.get("info") and not meta:
+            meta = track_summary(r["info"])
+        for f in r["formats"]:
+            url = f.get("url")
+            proto = f.get("protocol") or ""
+            vc, ac = f.get("vcodec") or "none", f.get("acodec") or "none"
+            if not url or (vc == "none" and ac == "none"):   # storyboards / SABR-only entries with no url
+                continue
+            kind = "audio" if vc == "none" else ("video" if ac == "none" else "muxed")
+            if audio_only and kind != "audio":
+                continue
+            sid = f"{r['client']}:{f.get('format_id')}"
+            if sid in seen:
+                continue
+            seen.add(sid)
+            item = {
+                "id": sid,
+                "client": r["client"],
+                "format_id": f.get("format_id"),
+                "kind": kind,
+                "ext": f.get("ext"),
+                "acodec": None if ac == "none" else ac,
+                "vcodec": None if vc == "none" else vc,
+                "abr": f.get("abr"),
+                "tbr": f.get("tbr"),
+                "asr": f.get("asr"),
+                "height": f.get("height"),
+                "quality": f.get("format_note"),
+                "language": f.get("language"),
+                "protocol": proto,
+                "filesize": f.get("filesize") or f.get("filesize_approx"),
+                "stream_url": _audio_link(request, video_id, r["client"], f.get("format_id")),
+                "_url": url,
+                "_headers": f.get("http_headers"),
+            }
+            if direct:
+                item["direct_url"] = url
+            out.append(item)
+
+    if probe:
+        def run(it):
+            if "m3u8" in it["protocol"]:
+                it["playable"] = None        # HLS is redirected, not byte-proxied
+            else:
+                it["playable"] = _probe(it["_url"], it["_headers"])
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(run, out))
+    for it in out:
+        it.pop("_url", None)
+        it.pop("_headers", None)
+
+    # best first: playable, audio before muxed before video, then bitrate
+    rank = {"audio": 0, "muxed": 1, "video": 2}
+    out.sort(key=lambda i: (i.get("playable") is False, rank[i["kind"]], -(i["abr"] or i["tbr"] or 0)))
+    return {
+        "video_id": video_id,
+        **(meta or {}),
+        "auto_stream_url": _audio_link(request, video_id),
+        "count": len(out),
+        "probed": probe,
+        "elapsed_s": round(time.time() - started, 1),
+        "sources": out,
+        "client_errors": errors,
+    }
+
+
 _PASS_HEADERS = ("content-type", "content-length", "content-range", "accept-ranges")
 
 
 @app.get("/audio/{video_id}", include_in_schema=False)
-def audio(video_id: str, request: Request, key: Optional[str] = Query(default=None)):
+def audio(
+    video_id: str,
+    request: Request,
+    key: Optional[str] = Query(default=None),
+    client: Optional[str] = Query(default=None),
+    fmt: Optional[str] = Query(default=None),
+):
     """Byte-range proxy for the audio stream (the <audio> element can't send X-API-Key)."""
     check_video_id(video_id)
+    _check_src(client, fmt)
     if API_KEY and key != API_KEY and request.headers.get("x-api-key") != API_KEY:
         raise HTTPException(401, "Invalid or missing key")
     rng = request.headers.get("range")
@@ -637,8 +785,9 @@ def audio(video_id: str, request: Request, key: Optional[str] = Query(default=No
     start = int(m.group(1)) if m and m.group(1) else 0       # suffix ranges (bytes=-N) fall back to 0
     end_req = int(m.group(2)) if m and m.group(2) else None
     up, last_err, chunked = None, "unknown", False
-    for attempt in (0, 1, 2):
-        e = _resolve_audio(video_id, force=(attempt == 1))
+    simple = not (client or fmt)
+    for attempt in ((0, 1) if simple else (0, 1, 2)):
+        e = _resolve_audio(video_id, force=(attempt == 1), client=client, fmt=fmt)
         if not e["url"]:
             raise HTTPException(502, "No playable audio stream found for this track")
         if "m3u8" in e["protocol"] or ".m3u8" in e["url"]:
@@ -647,11 +796,11 @@ def audio(video_id: str, request: Request, key: Optional[str] = Query(default=No
         h.setdefault("User-Agent", "Mozilla/5.0")
         # googlevideo (esp. android/ios clients) refuses open-ended or whole-file requests (403):
         # fetch it in <=10 MB ranged chunks, like yt-dlp does.
-        chunked = attempt != 2 and "googlevideo.com" in e["url"]
+        chunked = not simple and attempt != 2 and "googlevideo.com" in e["url"]
         if chunked:
             stop = start + CHUNK - 1 if end_req is None else min(end_req, start + CHUNK - 1)
             h["Range"] = f"bytes={start}-{stop}"
-        elif rng and attempt != 2:
+        elif rng and (simple or attempt != 2):
             h["Range"] = rng
         try:
             up = _upstream_opener().open(UrlRequest(e["url"], headers=h), timeout=25)
@@ -662,7 +811,7 @@ def audio(video_id: str, request: Request, key: Optional[str] = Query(default=No
             last_err = f"HTTP {err.code} from YouTube (chunked={chunked}, format={e['meta'].get('format_id')}, video={e['meta'].get('has_video')})"
             print(f"[audio] {video_id}: {last_err}", flush=True)
             if attempt == 0 and err.code in (403, 404, 410):
-                _audio_cache.pop(video_id, None)       # expired / blocked: re-resolve
+                _audio_cache.pop(_akey(video_id, client, fmt), None)       # expired / blocked: re-resolve
         except Exception as err:
             last_err = f"{type(err).__name__}: {err}"
             print(f"[audio] {video_id}: {last_err}", flush=True)
